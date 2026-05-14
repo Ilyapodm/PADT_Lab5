@@ -2,7 +2,6 @@
 
 #include <algorithm>   // std::clamp
 
-
 // Конфиг для Пид регулятора
 struct PIDConfig {
     float kp, ki, kd;
