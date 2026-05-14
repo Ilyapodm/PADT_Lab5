@@ -37,3 +37,13 @@ struct PID {
 
     void reset() { prevError = 0.f; integral = 0.f; initialized_ = false; }
 };
+
+// Создание PID из конфига
+[[nodiscard]] inline PID makePID(const PIDConfig& cfg) noexcept {
+    PID pid;
+    pid.kp            = cfg.kp;
+    pid.ki            = cfg.ki;
+    pid.kd            = cfg.kd;
+    pid.integralLimit = cfg.integralLimit;
+    return pid;
+}
