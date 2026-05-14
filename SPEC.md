@@ -12,24 +12,24 @@ docking-sim/
 ├── CMakeLists.txt
 ├──src/
 │   ├── simulation/
-│	│	├── Scene.hpp / .cpp          // владеет всеми объектами симуляции
-│   │   ├── PhysicsBody.hpp / .cpp      // масса, скорость, силы, момент инерции
-│   │   ├── Atmosphere.hpp / .cpp       // ветер, аэродинамическое сопротивление
-│   │   ├── Gravity.hpp / .cpp          // гравитационное поле
-│   │   ├── Thruster.hpp / .cpp         // модель двигателей (RCS + main)
-│   │   └── DockingPort.hpp / .cpp      // геометрия стыковки, детекция
+│	│	├── scene.hpp / .cpp             // владеет всеми объектами симуляции
+│   │   ├── physics_body.hpp / .cpp      // масса, скорость, силы, момент инерции
+│   │   ├── atmosphere.hpp / .cpp        // ветер, аэродинамическое сопротивление
+│   │   ├── gravity.hpp / .cpp           // гравитационное поле
+│   │   ├── thruster.hpp / .cpp          // модель двигателей (RCS + main)
+│   │   └── docking_port.hpp / .cpp      // геометрия стыковки, детекция
 │   ├── control/
-│   │   ├── PID.hpp / .cpp              // универсальный PID-регулятор
-│   │   └── Autopilot.hpp / .cpp        // фазовый автомат + управление тягой
+│   │   ├── PID.hpp                      // универсальный PID-регулятор
+│   │   └── autopilot.hpp / .cpp         // фазовый автомат + управление тягой
 │   ├── rendering/
-│   │   └── Renderer.hpp / .cpp         // SFML-слой, масштаб, HUD
+│   │   └── renderer.hpp / .cpp          // SFML-слой, масштаб, HUD
 │   └── utils/
-│       └── MathUtils.hpp               // clamp, lerp, cross2D, нормализация угла
+│       └── math_utils.hpp               // clamp, lerp, cross2D, нормализация угла
 ```
 
 ---
 
-## Слой 1 — Физическая модель (`PhysicsBody`)
+## Слой 1 — Физическая модель (`physics_body`)
 
 ### Что хранит объект
 
@@ -223,36 +223,46 @@ public:
 
 ## Слой 4 — Автопилот
 
-### PID-регулятор
+#### PID-регулятор
 
 ```cpp
-struct PID {
+// Конфиг для Пид регулятора
+struct PIDConfig {
     float kp, ki, kd;
+    float integral_limit = 50.f;
+};
 
-    float prevError = 0.f;
-    float integral  = 0.f;
+struct PID {
+    float kp = 0.f, ki = 0.f, kd = 0.f;
+    float integral_limit = 50.f;   
+
+    float prev_error    = 0.f;
+    float integral     = 0.f;
     
     bool initialized_ = false;  // избавляемся от derivative kick
 
     [[nodiscard]] float update(float error, float dt) {
 	        if (!initialized_) {
-		        prevError    = error;
+		        prev_error    = error;
 		        initialized_ = true;
 		        return 0.f;  // первый тик — только инициализация, никакого вывода    
 		    }
 		    
         integral += error * dt;
         // Anti-windup: ограничиваем накопленный интеграл
-        integral = std::clamp(integral, -50.f, 50.f);
+        integral = std::clamp(integral, -integral_limit, integral_limit);
 
-        float deriv = (dt > 1e-6f) ? (error - prevError) / dt : 0.f;
-        prevError = error;
+        float deriv = (dt > 1e-6f) ? (error - prev_error) / dt : 0.f;
+        prev_error = error;
 
         return kp * error + ki * integral + kd * deriv;
     }
 
-    void reset() { prevError = 0.f; integral = 0.f; initialized_ = false; }
+    void reset() { prev_error = 0.f; integral = 0.f; initialized_ = false; }
 };
+
+// Создание PID из конфига
+[[nodiscard]] inline PID make_PID(const PIDConfig& cfg) noexcept;
 ```
 
 **Anti-windup обязателен:** без него при длительном рассогласовании `integral` накопится до огромных значений и автопилот "взорвётся" при достижении цели.
@@ -287,10 +297,46 @@ struct PID {
 
 
 ```cpp
+#pragma once
+
+#include "PID.hpp"
+#include <vector>
+
+// Конфиг для Автопилота
+struct AutopilotConfig {
+    // Пороги переходов между фазами
+    float alignToApproachAngle   = 4.f;   // градусы
+    float approachToAlignAngle   = 8.f;
+    float approachToFinalDx      = 50.f;  // метры
+    float approachToFinalAngle   = 3.f;
+    float finalToApproachDx      = 70.f;
+    float finalToApproachAngle   = 6.f;
+
+    // Пороги успешной стыковки
+    float dockedDist             = 0.5f;  // метры
+    float dockedAngle            = 1.f;   // градусы
+    float dockedSpeed            = 0.1f;  // м/с
+
+    // Максимальная скорость при контакте
+    float maxDockingSpeed        = 0.5f;  // м/с
+};
+
+
+// конфиг коэффициентов для Пид регуляторов Автопилота
+struct AutopilotPIDConfig {
+    PIDConfig theta = { 2.0f, 0.02f, 3.0f  };
+    PIDConfig x     = { 0.8f, 0.01f, 1.5f  };
+    PIDConfig y     = { 0.5f, 0.005f, 1.2f };
+    PIDConfig dampX = { 1.2f, 0.05f, 0.8f  };
+    PIDConfig dampY = { 1.2f, 0.05f, 0.8f  };
+};
+
+// выход автопилота
 struct ThrustCommand {
     std::vector<float> throttles; // размер == thruster.count()
 };
 
+// FSM состояния
 enum class Phase {
     ALIGN,
     APPROACH,
@@ -299,43 +345,103 @@ enum class Phase {
     EXPLODED   // терминальный, без возврата
 };
 
+// структура для публичного геттера для рендеринга
+struct AutopilotDebugInfo {
+    bool pidTheta, pidX, pidY;
+    bool dampX, dampY;
+};
+
+
 class Autopilot {
-    const Thruster* thruster_ = nullptr; // non-owning, инициализируется в init()
-    PID pidTheta_, pidX_, pidY_;
-    PID dampX_, dampY_;   // velocity dampers — те же PID, setpoint = 0
-    Phase phase_ = Phase::ALIGN;  // начальная фаза явно
 public:
-    void init(const Thruster& t) {
-        thruster_ = &t;
-        idMain_      = t.id("main_fwd");
-        idRcsLeft_   = t.id("rcs_left");
-        idRcsRight_  = t.id("rcs_right");
-        idBwdLeft_   = t.id("rcs_bwd_left");
-        idBwdRight_  = t.id("rcs_bwd_right");
-        idRotCwL_    = t.id("rcs_rot_cw_l"); 
-        idRotCwR_    = t.id("rcs_rot_cw_r"); 
-        idRotCcwL_   = t.id("rcs_rot_ccw_l"); 
-        idRotCcwR_   = t.id("rcs_rot_ccw_r");
-    }
-    
-	void         setTarget(sf::Vector2f pos, float angle);
-	
-	// НЕ вызывает applyCommands — только возвращает ThrustCommand
+    // Инициализация — привязка к двигателям, однократно
+    void init(const Thruster& t);
+
+    // Установка целевой точки стыковки
+    void setTarget(sf::Vector2f pos, float angle);
+
+    // Главный метод — вызывается каждый физический тик из Scene
     [[nodiscard]] ThrustCommand update(const PhysicsBody& module,
+                                       const DockingTarget& target,
+                                       float dt);
+
+    // Уведомления от Scene о внешних событиях
+    void notifyDocked();
+    void notifyFailed();
+
+    // Геттер фазы — для HUD и Scene
+    [[nodiscard]] Phase phase() const;
+
+    // debug для рендеринга
+    [[nodiscard]] AutopilotDebugInfo debugInfo() const;  
+
+private:
+    // ── Зависимости ─────────────────────────────────────────────────
+    const Thruster* thruster_ = nullptr;
+
+    // ── Состояние FSM ───────────────────────────────────────────────
+    Phase phase_ = Phase::ALIGN;
+
+    // ── Цель стыковки ───────────────────────────────────────────────
+    sf::Vector2f targetPos_;
+    float        targetAngle_ = 0.f;
+
+    // ── PID регуляторы (позиция) ────────────────────────────────────
+    PID pidTheta_, pidX_, pidY_;
+
+    // ── Velocity dampers (скорость → 0) ────────────────────────────
+    PID dampX_, dampY_;
+
+    // ── Индексы двигателей (заполняются в init()) ───────────────────
+    ThrusterID idMain_;
+    ThrusterID idRcsLeft_,  idRcsRight_;
+    ThrusterID idBwdLeft_,  idBwdRight_;
+    ThrusterID idRotCwL_,   idRotCwR_;
+    ThrusterID idRotCcwL_,  idRotCcwR_;
+
+
+    // ── FSM ─────────────────────────────────────────────────────────
+    // Проверяет условия переходов, переключает phase_,
+    // вызывает reset() нужных PID/damper
+    void updatePhase(const PhysicsBody& module, const DockingTarget& target);
+
+    // ── Control ─────────────────────────────────────────────────────
+    // Считает ThrustCommand для текущей фазы
+    [[nodiscard]] ThrustCommand computeThrust(const PhysicsBody& module,
+                                              const DockingTarget& target,
+                                              float dt);
+
+    // Управление по отдельным осям — вызываются из computeThrust()
+    [[nodiscard]] float computeThetaControl(const PhysicsBody& module,
+                                            const DockingTarget& target,
+                                            float dt);
+
+    [[nodiscard]] float computeXControl(const PhysicsBody& module,
                                         const DockingTarget& target,
-                                        float dt) {
-        // ── Этап 1: FSM — проверяем переходы, меняем фазу ──────────────    
-        updatePhase(module, target);   // здесь включают/выключают PID  
-           
-        // ── Этап 2: Control — считаем управление для текущей фазы ───────   
-        return computeThrust(module, target, dt);
-    }
-                                        
-    [[nodiscard]] Phase phase() const { return phase_; }
-    
-    // Детерминированная активация PID регуляторов согласно схеме
+                                        float dt);
+
+    [[nodiscard]] float computeYControl(const PhysicsBody& module,
+                                        const DockingTarget& target,
+                                        float dt);
+
+    // Velocity dampers — гашение остаточных скоростей
+    [[nodiscard]] float computeDampX(const PhysicsBody& module, float dt);
+    [[nodiscard]] float computeDampY(const PhysicsBody& module, float dt);
+
+    // θ-PID активен во всех управляемых фазах (ALIGN, APPROACH, FINAL)
+    [[nodiscard]] bool isPidThetaActive()  const { return true; }
+
+    // X-PID (боковое смещение) — активен когда нужно выходить на ось стыковки
     [[nodiscard]] bool isPidXActive()  const { return phase_ == Phase::APPROACH || phase_ == Phase::FINAL; }
-	[[nodiscard]] bool isDampYActive() const { return phase_ == Phase::ALIGN    || phase_ == Phase::APPROACH; }
+
+    // Y-PID (продольное сближение) — только в финальном заходе
+    [[nodiscard]] bool isPidYActive()  const { return phase_ == Phase::FINAL; }
+
+    // dampX — гасит остаточную скорость по X когда X-PID не управляет осью
+	[[nodiscard]] bool isDampXActive() const { return phase_ == Phase::ALIGN; }
+
+    // dampY — гасит остаточную скорость по Y когда Y-PID не управляет осью
+    [[nodiscard]] bool isDampYActive() const { return phase_ == Phase::ALIGN    || phase_ == Phase::APPROACH; }
 };
 ```
 

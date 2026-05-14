@@ -6,44 +6,44 @@
 // Конфиг для Пид регулятора
 struct PIDConfig {
     float kp, ki, kd;
-    float integralLimit = 50.f;
+    float integral_limit = 50.f;
 };
 
 struct PID {
     float kp = 0.f, ki = 0.f, kd = 0.f;
-    float integralLimit = 50.f;   
+    float integral_limit = 50.f;   
 
-    float prevError    = 0.f;
+    float prev_error    = 0.f;
     float integral     = 0.f;
     
     bool initialized_ = false;  // избавляемся от derivative kick
 
     [[nodiscard]] float update(float error, float dt) {
 	        if (!initialized_) {
-		        prevError    = error;
+		        prev_error    = error;
 		        initialized_ = true;
 		        return 0.f;  // первый тик — только инициализация, никакого вывода    
 		    }
 		    
         integral += error * dt;
         // Anti-windup: ограничиваем накопленный интеграл
-        integral = std::clamp(integral, -integralLimit, integralLimit);
+        integral = std::clamp(integral, -integral_limit, integral_limit);
 
-        float deriv = (dt > 1e-6f) ? (error - prevError) / dt : 0.f;
-        prevError = error;
+        float deriv = (dt > 1e-6f) ? (error - prev_error) / dt : 0.f;
+        prev_error = error;
 
         return kp * error + ki * integral + kd * deriv;
     }
 
-    void reset() { prevError = 0.f; integral = 0.f; initialized_ = false; }
+    void reset() { prev_error = 0.f; integral = 0.f; initialized_ = false; }
 };
 
 // Создание PID из конфига
-[[nodiscard]] inline PID makePID(const PIDConfig& cfg) noexcept {
+[[nodiscard]] inline PID make_PID(const PIDConfig& cfg) noexcept {
     PID pid;
     pid.kp            = cfg.kp;
     pid.ki            = cfg.ki;
     pid.kd            = cfg.kd;
-    pid.integralLimit = cfg.integralLimit;
+    pid.integral_limit = cfg.integral_limit;
     return pid;
 }
