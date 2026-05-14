@@ -60,10 +60,7 @@ struct AutopilotDebugInfo {
 class Autopilot {
 public:
     // Инициализация — привязка к двигателям, однократно
-    void init(const Thruster& t);
-
-    // Установка целевой точки стыковки
-    void set_target(sf::Vector2f pos, float angle);
+    void init(const Thruster& t, AutopilotPIDConfig pid_cfg, const AutopilotConfig& ap_cfg);
 
     // Главный метод — вызывается каждый физический тик из Scene
     [[nodiscard]] ThrustCommand update(const PhysicsBody& module,
@@ -104,6 +101,9 @@ private:
     ThrusterID id_rot_cwl_,   id_rot_cwr_;
     ThrusterID id_rot_ccwl_,  id_rot_ccwr_;
 
+    //TODO сделать не тупое хранение конфига как поле, а его парсинг, так как есть ненужные части
+    // ── Конфиг ───────────────────
+    AutopilotConfig config_;
 
     // ── FSM ─────────────────────────────────────────────────────────
     // Проверяет условия переходов, переключает phase_,
@@ -134,13 +134,13 @@ private:
     [[nodiscard]] float compute_damp_y(const PhysicsBody& module, float dt);
 
     // θ-PID активен во всех управляемых фазах (ALIGN, APPROACH, FINAL)
-    [[nodiscard]] bool isPid_theta_active()  const { return true; }
+    [[nodiscard]] bool is_pid_theta_active()  const { return true; }
 
     // X-PID (боковое смещение) — активен когда нужно выходить на ось стыковки
-    [[nodiscard]] bool isPid_x_active()  const { return phase_ == Phase::APPROACH || phase_ == Phase::FINAL; }
+    [[nodiscard]] bool is_pid_x_active()  const { return phase_ == Phase::APPROACH || phase_ == Phase::FINAL; }
 
     // Y-PID (продольное сближение) — только в финальном заходе
-    [[nodiscard]] bool isPid_y_active()  const { return phase_ == Phase::FINAL; }
+    [[nodiscard]] bool is_pid_y_active()  const { return phase_ == Phase::FINAL; }
 
     // dampX — гасит остаточную скорость по X когда X-PID не управляет осью
 	[[nodiscard]] bool is_damp_x_active() const { return phase_ == Phase::ALIGN; }
