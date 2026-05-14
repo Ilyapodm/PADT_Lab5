@@ -60,7 +60,7 @@ struct AutopilotDebugInfo {
 class Autopilot {
 public:
     // Инициализация — привязка к двигателям, однократно
-    void init(const Thruster& t, AutopilotPIDConfig pid_cfg, const AutopilotConfig& ap_cfg);
+    void init(const Thruster& t, const AutopilotPIDConfig& pid_cfg, AutopilotConfig ap_cfg);
 
     // Главный метод — вызывается каждый физический тик из Scene
     [[nodiscard]] ThrustCommand update(const PhysicsBody& module,
@@ -84,10 +84,6 @@ private:
     // ── Состояние FSM ───────────────────────────────────────────────
     Phase phase_ = Phase::ALIGN;
 
-    // ── Цель стыковки ───────────────────────────────────────────────
-    sf::Vector2f target_pos_;
-    float        target_angle_ = 0.f;
-
     // ── PID регуляторы (позиция) ────────────────────────────────────
     PID pid_theta_, pid_x_, pid_y_;
 
@@ -101,7 +97,6 @@ private:
     ThrusterID id_rot_cwl_,   id_rot_cwr_;
     ThrusterID id_rot_ccwl_,  id_rot_ccwr_;
 
-    //TODO сделать не тупое хранение конфига как поле, а его парсинг, так как есть ненужные части
     // ── Конфиг ───────────────────
     AutopilotConfig config_;
 
@@ -134,7 +129,7 @@ private:
     [[nodiscard]] float compute_damp_y(const PhysicsBody& module, float dt);
 
     // θ-PID активен во всех управляемых фазах (ALIGN, APPROACH, FINAL)
-    [[nodiscard]] bool is_pid_theta_active()  const { return true; }
+    [[nodiscard]] bool is_pid_theta_active()  const { return phase_ != Phase::DOCKED && phase_ != Phase::EXPLODED; }
 
     // X-PID (боковое смещение) — активен когда нужно выходить на ось стыковки
     [[nodiscard]] bool is_pid_x_active()  const { return phase_ == Phase::APPROACH || phase_ == Phase::FINAL; }

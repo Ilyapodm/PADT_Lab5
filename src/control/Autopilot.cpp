@@ -13,8 +13,8 @@
 // Вызывается один раз из Scene до первого update()
 // ─────────────────────────────────────────────────────────────────────────────
 void Autopilot::init(const Thruster& t,
-                     AutopilotPIDConfig pid_cfg,
-                     const AutopilotConfig& ap_cfg)
+                     const AutopilotPIDConfig& pid_cfg,
+                     AutopilotConfig ap_cfg)
 {
     thruster_ = &t;
 
@@ -125,14 +125,19 @@ void Autopilot::update_phase(const PhysicsBody&   module,
     const float dtheta = std::abs(
         normalize_angle(target.port_angle - module.angle)
     );
-    const float dx = std::abs(target.port_position.x - module.position.x);
+    
+    const sf::Vector2f delta = target.port_position - module.position;
+    const float cos_a = std::cos(target.port_angle);
+    const float sin_a = std::sin(target.port_angle);
+    const float dx = std::abs(delta.x * cos_a + delta.y * sin_a); // dot(delta, right)
+
 
     switch (phase_) {
 
     case Phase::ALIGN:
         if (dtheta < config_.align_to_approach_angle) {
             // Переходим в APPROACH, активируется X-PID
-            // damp_x_/damp_y_ были активны в ALIGN — сбрасываем
+            // damp_y_ все еще активен
             damp_x_.reset();
             phase_ = Phase::APPROACH;
         }
@@ -254,52 +259,106 @@ float Autopilot::compute_theta_control(const PhysicsBody&   module,
                                         const DockingTarget& target,
                                         float                dt)
 {
-    const float error = normalizeAngle(target.portAngle - module.angle);
+    const float error = normalize_angle(target.port_angle - module.angle);
     return pid_theta_.update(error, dt);
 }
 
+// C++20
 // ─────────────────────────────────────────────────────────────────────────────
-// compute_x_control
-// APPROACH: цель — approachPoint (выровняться на оси стыковки, не врезаться в порт)
-// FINAL:    цель — portPosition  (идём прямо к порту)
+// compute_x_control — боковое смещение (перпендикуляр к оси захода)
+//
+// Проецируем вектор delta на правый вектор порта, а не берём мировой X.
+// APPROACH: выравниваемся на approachPoint
+// FINAL:    идём к portPosition
+//
+// Система координат SFML: Y↓, угол от +X по часовой.
+// right = ( cos(port_angle),  sin(port_angle) ) — перпендикуляр к оси захода
 // ─────────────────────────────────────────────────────────────────────────────
-float Autopilot::compute_x_control(const PhysicsBody&   module,
-                                    const DockingTarget& target,
-                                    float                dt)
+float Autopilot::compute_x_control(const PhysicsBody& module,
+                                   const DockingTarget& target,
+                                   float dt)
 {
     const sf::Vector2f goal = (phase_ == Phase::APPROACH)
-        ? target.approachPoint
-        : target.portPosition;
+        ? target.approach_point
+        : target.port_position;
 
-    const float error = goal.x - module.position.x;
+    // Вектор от модуля до цели в мировых координатах
+    const sf::Vector2f delta = goal - module.position;
+
+    // Единичный вектор «вправо» в системе порта
+    // (перпендикуляр к направлению захода, Y↓ SFML)
+    const float cos_a = std::cos(target.port_angle);
+    const float sin_a = std::sin(target.port_angle);
+    const sf::Vector2f right{ cos_a, sin_a };
+
+    // Проекция: насколько мы «сбоку» от оси стыковки
+    const float error = delta.x * right.x + delta.y * right.y;
+
     return pid_x_.update(error, dt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// compute_y_control
-// Только FINAL. Цель — portPosition.y
-// Y↓: error > 0 означает «нам нужно двигаться вниз» → main_fwd
+// compute_y_control — продольное смещение (вдоль оси захода)
+//
+// Проецируем delta на вектор «вперёд» (к порту), а не берём мировой Y.
+// Активен только в FINAL. Цель — portPosition.
+//
+// forward = ( -sin(port_angle), cos(port_angle) ) — направление к порту
+// error > 0: нужно двигаться «к порту» → main_fwd
+// error < 0: мы проскочили порт → bwd (торможение)
 // ─────────────────────────────────────────────────────────────────────────────
-float Autopilot::compute_y_control(const PhysicsBody&   module,
-                                    const DockingTarget& target,
-                                    float                dt)
+float Autopilot::compute_y_control(const PhysicsBody& module,
+                                   const DockingTarget& target,
+                                   float dt)
 {
-    const float error = target.portPosition.y - module.position.y;
+    const sf::Vector2f delta = target.port_position - module.position;
+
+    // Единичный вектор «вперёд» вдоль оси захода (к порту)
+    const float cos_a = std::cos(target.port_angle);
+    const float sin_a = std::sin(target.port_angle);
+    const sf::Vector2f forward{ -sin_a, cos_a };
+
+    // Проекция: насколько мы «далеко» от порта вдоль оси
+    const float error = delta.x * forward.x + delta.y * forward.y;
+
     return pid_y_.update(error, dt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// compute_damp_x / compute_damp_y
-// Setpoint = 0: гасим скорость до нуля.
-// ki > 0 в конфиге позволяет скомпенсировать постоянный ветер.
+// local_velocity — проецирует мировую скорость на локальные оси модуля
+//
+// SFML Y↓, angle от +X по часовой:
+//   local_right   = ( cos_a,  sin_a)  — ось X модуля
+//   local_forward = (-sin_a,  cos_a)  — ось Y модуля (к носу)
+//
+// Это умножение вектора velocity на транспонированную матрицу поворота:
+//   | cos_a   sin_a | * | vx |
+//   |-sin_a   cos_a |   | vy |
+// ─────────────────────────────────────────────────────────────────────────────
+static sf::Vector2f local_velocity(const PhysicsBody& module) noexcept
+{
+    const float cos_a = std::cos(module.angle);
+    const float sin_a = std::sin(module.angle);
+    return {
+         module.velocity.x * cos_a + module.velocity.y * sin_a,  // боковая
+        -module.velocity.x * sin_a + module.velocity.y * cos_a   // продольная
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// compute_damp_x — гасим боковую скорость (local X)
 // ─────────────────────────────────────────────────────────────────────────────
 float Autopilot::compute_damp_x(const PhysicsBody& module, float dt)
 {
-    // error = 0 - velocity.x: если летим вправо, нужен импульс влево
-    return damp_x_.update(-module.velocity.x, dt);
+    const float local_vx = local_velocity(module).x;
+    return damp_x_.update(-local_vx, dt);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// compute_damp_y — гасим продольную скорость (local Y)
+// ─────────────────────────────────────────────────────────────────────────────
 float Autopilot::compute_damp_y(const PhysicsBody& module, float dt)
 {
-    return damp_y_.update(-module.velocity.y, dt);
+    const float local_vy = local_velocity(module).y;
+    return damp_y_.update(-local_vy, dt);
 }
