@@ -19,11 +19,6 @@ struct AutopilotConfig {
     float maxDockingSpeed        = 0.5f;  // м/с
 };
 
-// Конфиг для Пид регулятора
-struct PIDConfig {
-    float kp, ki, kd;
-    float integralLimit = 50.f;
-};
 
 // конфиг коэффициентов для Пид регуляторов Автопилота
 struct AutopilotPIDConfig {
