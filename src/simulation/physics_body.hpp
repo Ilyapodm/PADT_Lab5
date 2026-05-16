@@ -62,6 +62,22 @@ struct PhysicsBody {
         return std::hypot(velocity.x, velocity.y);
     }
 
+    // Снапшот для интерполяции рендеринга 
+    // Renderer интерполирует между prevSnapshot и текущим состоянием.
+    struct Snapshot {
+        sf::Vector2f position;
+        float        angle;
+    };
+
+    [[nodiscard]] Snapshot snapshot() const noexcept {
+        return { position, angle };
+    }
+
+    // Полудиагональ корпуса — грубый радиус для быстрой broad-phase проверки перед полноценным OBB-тестом
+    [[nodiscard]] float bounding_radius() const noexcept {
+        return std::hypot(width, height) * 0.5f;
+    }
+
 private:
     float mass_    = 1.f;  // масса, кг
     float inertia_ = 1.f;  // момент инерции, кг·м²
