@@ -29,55 +29,82 @@ docking-sim/
 
 ---
 
+## Статус реализации
+
+| Файл | Статус | Источник истины |
+|---|---|---|
+| PID.hpp | В работе | Файл |
+| autopilot.hpp / .cpp | В работе | Файл |
+| docking_port.hpp / .cpp | Готов | Файл |
+| physics_body.hpp / .cpp | Готов | Файл |
+
+Остальное не начато!
+
+> Если файл существует — он авторитетнее SPEC.
+> SPEC описывает только то, что ещё не реализовано.
+
+---
+
 ## Слой 1 — Физическая модель (`physics_body`)
 
 ### Что хранит объект
 
 ```cpp
-// C++20
 struct PhysicsBody {
-    sf::Vector2f position, velocity;  // мировые координаты, м/с
-    float angle = 0.f, angular_vel = 0.f;
-    sf::Vector2f net_force;
+    // кинематика
+    sf::Vector2f position, velocity;  // мировые координаты, скорость центра масс, м/с
+    float angle = 0.f, angular_vel = 0.f;  // угол поворота, угловая скорость
+
+    sf::Vector2f net_force; // накопители сил, сбрасываются каждый тик
     float net_torque = 0.f;
 
+    // геттеры и сеттеры
     [[nodiscard]] float mass()    const { return mass_; }
     [[nodiscard]] float inertia() const { return inertia_; }
-    void set_mass(float m);
-    void set_inertia(float i);
-    // ...
+    void set_mass(float m);  // пересчитывает inertia
+    void set_size(float w, float h);  // пересчитывает inertia
+    
+    // Геометрия корпуса 
+    float width  = 10.f;  // м, по локальной оси X
+    float height = 20.f;  // м, по локальной оси Y
+
+    // применение сил через центр масс
+    void apply_force(sf::Vector2f f) noexcept;
+
+    // применение сил в произвольную точку
+    void apply_force_at_point(sf::Vector2f f, sf::Vector2f offset) noexcept;
+
+    // Интегратор — Symplectic Euler
+    void integrate(float dt) noexcept;
+
+    // Сброс накопителей — вызывать ПОСЛЕ integrate()
+    void reset_forces() noexcept;
+
+    // Скорость
+    [[nodiscard]] float speed() const noexcept;
+
+    // Полудиагональ корпуса — грубый радиус для быстрой broad-phase
+    [[nodiscard]] float bounding_radius() const noexcept
+
+    // Снапшот для интерполяции рендеринга 
+    struct Snapshot {
+        sf::Vector2f position;
+        float        angle;
+    };
+    [[nodiscard]] Snapshot snapshot() const noexcept {
+        return { position, angle };
+    }
+
 private:
     float mass_    = 1.f;
     float inertia_ = 1.f;
 };
-
 ```
 
-### Интегратор — Symplectic Euler
+Интегратор - Symplectic Euler. Обычный Euler неустойчив при упругих силах. Symplectic (полунеявный) Euler устойчив и дёшев
 
-Обычный Euler неустойчив при упругих силах. Symplectic (полунеявный) Euler устойчив и дёшев:
-
-```cpp
-void PhysicsBody::integrate(float dt) {
-    // 1. Сначала обновляем скорости
-    velocity   += (net_force  / mass_)    * dt;
-    angular_vel += (net_torque / inertia_) * dt;
-    // 2. Затем позиции (используют уже новые скорости)
-    position   += velocity    * dt;
-    angle      += angular_vel  * dt;
-}
-```
-
-### Торк от силы в точке
-
-Сила, приложенная не в центре масс, создаёт и линейное ускорение, и вращение:
-
-```cpp
-void PhysicsBody::apply_force_at_point(sf::Vector2f f, sf::Vector2f offset) {
-    net_force  += f;
-    net_torque += offset.x * f.y - offset.y * f.x;  // 2D cross product
-}
-```
+### Что является физической моделью
+Модуль и станция - физический объект, на них действует гравитация и ветер, могут быть расположены произвольно в пространстве
 
 ---
 
@@ -86,16 +113,42 @@ void PhysicsBody::apply_force_at_point(sf::Vector2f f, sf::Vector2f offset) {
 ### Гравитация
 
 ```cpp
+// Система координат: Y↓, X→ (SFML). Земля — в начале мировых координат {0, 0}.
+// Орбитальная гравитация: сила направлена к earth_center_, убывает как 1/r².
 class Gravity {
 public:
-    explicit Gravity(float g = 9.81f) : g_{g} {}
+    // mu = G * M — стандартный гравитационный параметр.
+    // Задаётся как mu = v_orb² * r, где v_orb и r — желаемые параметры орбиты.
+    // Не используй реальные G и M: радиус орбиты МКС не влезет ни в одно окно.
+    explicit Gravity(sf::Vector2f earth_center = {0.f, 0.f},
+                     float mu                  = 2'880'000.f)
+        : earth_center_{earth_center}
+        , mu_{mu}
+    {}
 
-    [[nodiscard]] sf::Vector2f force_on(const PhysicsBody& body) const {
-        return { 0.f, body.mass() * g_ };  // +Y = вниз (экранные координаты SFML)
-    }
+    // Gravity::force_on → возвращает вектор к earth_center_ с величиной mu*m/r²
+    // Направление: всегда к Земле (не константное «вниз»)
+    [[nodiscard]] sf::Vector2f force_on(const PhysicsBody& body) const noexcept;
+
+    [[nodiscard]] float mu() const noexcept { return mu_; }
+
 private:
-    float g_;
+    sf::Vector2f earth_center_;
+    float        mu_;   // G*M, м³/с²
 };
+
+// Параметры орбиты. Задай r и v_orb — mu вычислится автоматически.
+// Формула: mu = v_orb² * r  (условие круговой орбиты)
+struct OrbitConfig {
+    float orbit_radius  = 800.f;   // м — расстояние от Земли до станции
+    float orbital_speed = 60.f;    // м/с — скорость станции по орбите
+
+    [[nodiscard]] float mu() const noexcept {
+        return orbital_speed * orbital_speed * orbit_radius;
+    }
+};
+
+
 ```
 
 ### Атмосфера и ветер
@@ -111,15 +164,7 @@ class Atmosphere {
 public:
     // Синусоидальный порывистый ветер + шум
     [[nodiscard]] sf::Vector2f wind_at(float time) const;
-    [[nodiscard]] sf::Vector2f drag_force(const PhysicsBody& body, float time) const {
-		// В начало dragForce():
-		sf::Vector2f rel_vel = body.velocity - windAt(time);
-		float speed = std::hypot(rel_vel.x, rel_vel.y);  // hypot безопаснее sqrt
-		if (speed < 1e-4f) return {};  // нет относительного движения — нет силы
-		
-		sf::Vector2f dir = rel_vel / speed;  // нормализация только после проверки
-		return -0.5f * air_density_ * drag_coeff_ * front_area_ * speed * speed * dir;    
-    }
+    [[nodiscard]] sf::Vector2f drag_force(const PhysicsBody& body, float time) const;
 
 private:
     sf::Vector2f base_wind_      = { 5.f, 0.f };  // м/с, постоянная составляющая
@@ -141,17 +186,17 @@ private:
 Модуль имеет 9 двигателей: **8 RCS-движков** (маневровые) + **1 главный**.  
 Каждый движок расположен в конкретной точке корпуса и имеет направление тяги в локальной СК.
 
-| Label         | localOffset  | localDir | Назначение              |
-| ------------- | ------------ | -------- | ----------------------- |
-| main_fwd      | (0, +H/2)    | (0, −1)  | Сближение со станцией   |
-| rcs_bwd_left  | (−W/2, +H/4) | (0, +1)  | Торможение (левый)      |
-| rcs_bwd_right | (+W/2, +H/4) | (0, +1)  | Торможение (правый)     |
-| rcs_left      | (−W/2, 0)    | (−1, 0)  | Движение влево          |
-| rcs_right     | (+W/2, 0)    | (+1, 0)  | Движение вправо         |
-| rcs_rot_cw_l  | (−W/2, −H/4) | (0, −1)  | Вращение по часовой     |
-| rcs_rot_cw_r  | (+W/2, +H/4) | (0, +1)  | Вращение по часовой     |
-| rcs_rot_ccw_l | (−W/2, +H/4) | (0, +1)  | Вращение против часовой |
-| rcs_rot_ccw_r | (+W/2, −H/4) | (0, −1)  | Вращение против часовой |
+| Label         | localOffset  | localDir | Назначение              | PID сигнал            |
+| ------------- | ------------ | -------- | ----------------------- | --------------------- |
+| main_fwd      | (0, +H/2)    | (0, −1)  | Сближение со станцией   | Y-PID > 0, damp_y > 0 |
+| rcs_bwd_left  | (−W/2, +H/4) | (0, +1)  | Торможение (левый)      | Y-PID < 0, damp_y < 0 |
+| rcs_bwd_right | (+W/2, +H/4) | (0, +1)  | Торможение (правый)     | Y-PID < 0, damp_y < 0 |
+| rcs_left      | (−W/2, 0)    | (−1, 0)  | Движение влево          | X-PID < 0, damp_x < 0 |
+| rcs_right     | (+W/2, 0)    | (+1, 0)  | Движение вправо         | X-PID > 0, damp_x > 0 |
+| rcs_rot_cw_l  | (−W/2, −H/4) | (0, −1)  | Вращение по часовой     | θ-PID > 0             |
+| rcs_rot_cw_r  | (+W/2, +H/4) | (0, +1)  | Вращение по часовой     | θ-PID > 0             |
+| rcs_rot_ccw_l | (−W/2, +H/4) | (0, +1)  | Вращение против часовой | θ-PID < 0             |
+| rcs_rot_ccw_r | (+W/2, −H/4) | (0, −1)  | Вращение против часовой | θ-PID < 0             |
 Координаты: Y - смотрит вниз, X - направо
 ```
                            [ СТАНЦИЯ ]
@@ -241,22 +286,7 @@ struct PID {
     
     bool initialized_ = false;  // избавляемся от derivative kick
 
-    [[nodiscard]] float update(float error, float dt) {
-	        if (!initialized_) {
-		        prev_error    = error;
-		        initialized_ = true;
-		        return 0.f;  // первый тик — только инициализация, никакого вывода    
-		    }
-		    
-        integral += error * dt;
-        // Anti-windup: ограничиваем накопленный интеграл
-        integral = std::clamp(integral, -integral_limit, integral_limit);
-
-        float deriv = (dt > 1e-6f) ? (error - prev_error) / dt : 0.f;
-        prev_error = error;
-
-        return kp * error + ki * integral + kd * deriv;
-    }
+    [[nodiscard]] float update(float error, float dt);
 
     void reset() { prev_error = 0.f; integral = 0.f; initialized_ = false; }
 };
@@ -275,9 +305,9 @@ struct PID {
 
 | Откуда   | Куда     | Условие входа                                  | Активация | Отключаем + сбрасываем состояние |
 | -------- | -------- | ---------------------------------------------- | --------- | -------------------------------- |
-| ALIGN    | APPROACH | \|dθ\| < 4°                                    | X-PID     | -                                |
-| APPROACH | ALIGN    | \|dθ\| > 8°                                    | Vx-damper | X-PID                            |
-| APPROACH | FINAL    | \|dX\| < 50 м && \|dθ\| < 3°                   | Y-PID     | Vy-damper                        |
+| ALIGN    | APPROACH | \|dθ\| < 4°                                    | X-PID     | -                                | 
+| APPROACH | ALIGN    | \|dθ\| > 8°                                    | Vx-damper | X-PID                            | 
+| APPROACH | FINAL    | \|dX\| < 50 м && \|dθ\| < 3°                   | Y-PID     | Vy-damper                        | 
 | FINAL    | APPROACH | \|dX\| > 70 м \|\| \|dθ\| > 6°                 | Vy-damper | Y-PID                            |
 | FINAL    | DOCKED   | dist < 0.5 м && \|dθ\| < 1° && \|v\| < 0.1 м/с |           |                                  |
 | FINAL    | EXPLODED | dist < 0.5 м && \|v\| > v_max                  |           |                                  |
@@ -285,7 +315,7 @@ struct PID {
 Сброс позиционного PID происходит **при выходе** из фазы, где он был активен, а не при входе в следующую.
 
 
-Какие PID активны в каждой фазе
+Какие PID активны в каждой фазе:
 
 | Фаза     | θ-PID | X-PID | Y-PID | Vx-damper | Vy-damper | Логика                                        |
 | -------- | ----- | ----- | ----- | --------- | --------- | --------------------------------------------- |
@@ -313,7 +343,7 @@ struct AutopilotConfig {
     float docked_speed            = 0.1f;  // м/с
 
     // Максимальная скорость при контакте
-    float maxDocking_speed        = 0.5f;  // м/с
+    float max_docking_speed        = 0.5f;  // м/с
 };
 
 
@@ -421,7 +451,7 @@ private:
     [[nodiscard]] float compute_damp_y(const PhysicsBody& module, float dt);
 
     // θ-PID активен во всех управляемых фазах (ALIGN, APPROACH, FINAL)
-    [[nodiscard]] bool isPid_theta_active()  const { return true; }
+    [[nodiscard]] bool isPid_theta_active()  const { return phase_ != Phase::DOCKED && phase_ != Phase::EXPLODED; }
 
     // X-PID (боковое смещение) — активен когда нужно выходить на ось стыковки
     [[nodiscard]] bool isPid_x_active()  const { return phase_ == Phase::APPROACH || phase_ == Phase::FINAL; }
@@ -457,6 +487,7 @@ private:
 ```cpp
 
 struct DockingPort {
+    // Локальная система координат
     sf::Vector2f local_offset;   // смещение от центра масс тела, м
     float        local_angle;    // угол порта в локальной СК тела, рад
 
@@ -478,10 +509,10 @@ struct DockingResult { bool success; float speed; float angle_diff; };
 struct DockingTarget {
     sf::Vector2f approach_point;  // точка за портом, откуда начинать заход
     sf::Vector2f port_position;   // мировые координаты порта станции
-    float        port_angle;      // требуемый угол подхода
+    float        port_angle;      // требуемый угол подхода (включает в себя Pi)
 };
 
-// Вычисление — в DockingPort:
+// Вычисление — в scene.update():
 [[nodiscard]] DockingTarget compute_target(
     const DockingPort& station_port,
     const PhysicsBody& station) const;
@@ -489,17 +520,11 @@ struct DockingTarget {
 
 ---
 
-## Слой 6 — Game Loop (main.cpp)
+## Слой 6 — Game Loop 
 
 ### Фиксированный физический шаг + accumulator
 
 ```cpp
-// C++20
-#include "simulation/Scene.hpp"
-#include "rendering/Renderer.hpp"
-#include <SFML/Graphics.hpp>
-#include <algorithm>  // std::min
-
 int main() {
     sf::RenderWindow window({1280u, 720u}, "Docking Sim");
     window.setFramerateLimit(60);
@@ -542,8 +567,16 @@ int main() {
 > `std::min(frame_time, 0.05f)` — "spiral of death" protection:  
 > если кадр занял > 50 мс (лаг), не пытаемся наверстать физику бесконечным циклом.
 
+### Scene
+Scene должна в методе update (1 физический тик) должна:
+- Применять воздействие физики на тела (двигатели, атмосфера, гравитация)
+- Проверять коллизию (сначала через bounding_radius - грубо, потом через SAT (проверка OBB))
+- Рассчитывать Snapshot для красивого рендеринга
+- Проверять стыковку.
+  - Если стыковка удалась, соединить тела (они продолжают двигаться вместе как одно целое, пересчет физики)
+  - Если нет - взрыв модуля и станции
+
 ```cpp
-// C++20
 class Scene {
 public:
     explicit Scene(/* config */);
@@ -559,12 +592,13 @@ private:
     Thruster     thruster_;
     Autopilot    autopilot_;
     DockingPort  module_port_, station_port_;
+    OrbitConfig  orbit_cfg_;
     float total_time_ = 0.f;
     bool station_docked_ = false;
     void merge_bodies();
 };
 
-// C++20 — Scene.cpp
+// Scene.cpp
 void Scene::update(float dt) {
 	// ── МОДУЛЬ ──────────────────────────────────────────
     // 1. Внешние силы
@@ -579,16 +613,16 @@ void Scene::update(float dt) {
 
     // 3. Интегрирование + сброс
     module_.integrate(dt);
-    module_.resetForces();
+    module_.reset_forces();
     
     // ── СТАНЦИЯ ─────────────────────────────────────────────────────
     // Станция — полноценное PhysicsBody: движется под действием
     // гравитации и атмосферного сопротивления (ветра).
-    // Стыковка не является мгновенной «заморозкой» — станция продолжает
+    // Стыковка не является мгновенной «заморозкой» — станция вместе с модулем продолжают
     // двигаться до фактического объединения тел.
     // DockingTarget пересчитывается КАЖДЫЙ тик (см. выше),
     // поэтому автопилот всегда нацелен на актуальную позицию порта
-    if (!stationDocked_) {        
+    if (!station_docked_) {        
 	    station_.apply_force(gravity_.force_on(station_));        
 	    station_.apply_force(atmosphere_.drag_force(station_, total_time_));     
 	    
@@ -609,6 +643,27 @@ void Scene::update(float dt) {
 
     total_time_ += dt;
 }
+```
+
+```cpp
+// scene.cpp — Scene::reset() / конструктор
+void Scene::reset() {
+    const float r = orbit_cfg_.orbit_radius;
+    const float v = orbit_cfg_.orbital_speed;
+
+    // Станция — прямо «над» Землёй (в SFML Y↓, «над» = отрицательный Y)
+    station_.position = { 0.f, -r };
+    station_.velocity = { v,  0.f };   // летит вправо → орбита по часовой стрелке
+
+    // Модуль — рядом, то же состояние орбиты + небольшое смещение
+    // Автопилот видит относительную ошибку ~{separation, 0} и начинает сближение
+    constexpr float separation = 150.f;  // м, начальное расстояние между портами
+    module_.position = { separation, -r };
+    module_.velocity = { v, 0.f };       // та же орбитальная скорость
+
+    gravity_ = Gravity{ {0.f, 0.f}, orbit_cfg_.mu() };
+}
+
 ```
 
 ---
@@ -636,16 +691,7 @@ sf::Vector2f to_screen(sf::Vector2f world_pos) {
     // + при необходимости смещение камеры
 }
 
-// ДОБАВИТЬ — структура для хранения двух состояний (нужна при реализации интерполяции):
-// struct BodySnapshot { sf::Vector2f position; float angle; };
-//
-// В PhysicsBody добавить:
-// BodySnapshot snapshot() const { return { position, angle }; }
-//
-// В game loop, перед integrate():
-// prevSnapshot = module.snapshot();
-//
-// В Renderer::draw():
+// ДОБАВИТЬ в Renderer::draw():
 // float alpha = accumulator / PHYSICS_DT;
 // sf::Vector2f renderPos = prevSnapshot.position * (1.f - alpha) + module.position * alpha;
 // float renderAngle      = std::lerp(prevSnapshot.angle, module.angle, alpha);
@@ -702,16 +748,15 @@ $$I = \frac{m (w^2 + h^2)}{12}$$
 1. Накопить внешние силы (gravity, atmosphere)
 2. Накопить силы управления (thruster)
 3. integrate(dt)          → обновить скорости и позиции
-4. resetForces()          → сбросить netForce/netTorque
-5. Проверить докинг
-6. Рендерить
+4. reset_forces()          → сбросить net_force/net_torque
+5. Проверить столкновение
+6. Проверить докинг
+7. Рендерить
 ```
-
-Нарушение порядка (например, resetForces до integrate) — физически неверное поведение.
 
 ### 6. `[[nodiscard]]` везде, где важен результат
 
-`checkDocking`, `windAt`, `worldPosition` — все чистые функции должны быть `[[nodiscard]]`.  
+`check_docking`, `wind_at`, `world_position` — все чистые функции должны быть `[[nodiscard]]`.  
 Компилятор предупредит, если результат случайно проигнорирован.
 
 ### 7. Residual velocity при откате фазы.
@@ -719,56 +764,10 @@ $$I = \frac{m (w^2 + h^2)}{12}$$
 
 ### 8. Объединение тел после стыковки (Compound Body)
 
-После `checkDocking` → `success`: вызвать `Scene::mergeBodies()`.
+После `check_docking` → `success`: вызвать `Scene::merge_bodies()`.
 Пересчитать: массу (сумма), центр масс (взвешенное среднее),
 скорость (закон импульса), момент инерции (теорема Штейнера),
 угловую скорость (закон момента импульса).
-Установить `stationDocked_ = true` — модуль исключается из
+Установить `station_docked_ = true` — модуль исключается из
 физического цикла. Compound-тело продолжает движение под
 действием гравитации и ветра как единый объект.
-
-
----
-
-## Порядок реализации (рекомендуемый)
-
-1. **PhysicsBody + интегратор** — проверить равномерное движение и свободное падение
-2. **Gravity** — тест: тело должно ускоряться вниз с 9.81 м/с²
-3. **Renderer** — простой прямоугольник-модуль и точка-станция
-4. **Ручное управление (WASD)** — почувствовать физику до автопилота
-5. **Atmosphere** — добавить ветер и сопротивление, наблюдать снос
-6. **Thruster + DockingPort** — модель двигателей, геометрия портов
-7. **PID для одной оси** — сначала только Y, отладка kp/kd/ki
-8. **Полный Autopilot + фазовый автомат** — три степени свободы
-9. **Детекция стыковки + состояния DOCKED/FAILED**
-10. **HUD + полировка** — визуальная обратная связь
-
----
-
-## Сборка (CMakeLists.txt — минимальный шаблон)
-
-```cmake
-cmake_minimum_required(VERSION 3.20)
-project(docking_sim CXX)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-find_package(SFML 2.6 COMPONENTS graphics window system REQUIRED)
-
-add_executable(docking_sim
-    src/main.cpp
-    src/simulation/Scene.cpp
-    src/simulation/PhysicsBody.cpp
-    src/simulation/Gravity.cpp
-    src/simulation/Atmosphere.cpp
-    src/simulation/Thruster.cpp
-    src/simulation/DockingPort.cpp
-    src/control/PID.cpp
-    src/control/Autopilot.cpp
-    src/rendering/Renderer.cpp
-)
-
-target_link_libraries(docking_sim PRIVATE sfml-graphics sfml-window sfml-system)
-target_compile_options(docking_sim PRIVATE -Wall -Wextra -Wpedantic)
-```
