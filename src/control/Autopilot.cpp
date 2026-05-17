@@ -1,5 +1,5 @@
 #include "autopilot.hpp"
-#include "../utils/math_utils.hpp"  // normalizeAngle
+#include "../utils/math_utils.hpp"
 #include "../simulation/thruster.hpp"
 
 #include <cassert>
@@ -52,8 +52,10 @@ void Autopilot::init(const Thruster& t,
 // update — главный метод, вызывается каждый физический тик из Scene
 // Порядок: сначала FSM (update_phase), потом управление (compute_thrust)
 // ─────────────────────────────────────────────────────────────────────────────
-ThrustCommand Autopilot::update(const PhysicsBody&  module,
+ThrustCommand Autopilot::update(const PhysicsBody&   module,
+                                const PhysicsBody&   station,
                                 const DockingTarget& target,
+                                
                                 float                dt)
 {
     assert(thruster_ != nullptr && "Autopilot::init() не был вызван!");
@@ -69,12 +71,12 @@ ThrustCommand Autopilot::update(const PhysicsBody&  module,
     update_phase(module, target);
 
     // 2. Управление: считаем сигналы, маппим на throttles
-    return compute_thrust(module, target, dt);
+    return compute_thrust(module, target, station, dt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // notify_docked / notify_failed — уведомления от Scene
-// Scene сама решает факт стыковки через checkDocking(), мы только меняем фазу
+// Scene сама решает факт стыковки через check_docking(), мы только меняем фазу
 // ─────────────────────────────────────────────────────────────────────────────
 void Autopilot::notify_docked()
 {
@@ -138,7 +140,7 @@ void Autopilot::update_phase(const PhysicsBody&   module,
         if (dtheta < config_.align_to_approach_angle) {
             // Переходим в APPROACH, активируется X-PID
             // damp_y_ все еще активен
-            damp_x_.reset();
+            damp_x_.reset();  // перезагружаем его, если вернемся обратно в Align
             phase_ = Phase::APPROACH;
         }
         break;
@@ -187,6 +189,7 @@ void Autopilot::update_phase(const PhysicsBody&   module,
 // ─────────────────────────────────────────────────────────────────────────────
 ThrustCommand Autopilot::compute_thrust(const PhysicsBody&   module,
                                          const DockingTarget& target,
+                                         const PhysicsBody& station,
                                          float                dt)
 {
     ThrustCommand cmd;
@@ -233,13 +236,13 @@ ThrustCommand Autopilot::compute_thrust(const PhysicsBody&   module,
 
     // ── Velocity dampers ─────────────────────────────────────────────
     if (is_damp_x_active()) {
-        const float sig = compute_damp_x(module, dt);
+        const float sig = compute_damp_x(module, station, dt);
         if (sig > 0.f) set(id_rcs_right_, sig);
         else           set(id_rcs_left_,  -sig);
     }
 
     if (is_damp_y_active()) {
-        const float sig = compute_damp_y(module, dt);
+        const float sig = compute_damp_y(module, station, dt);
         if (sig > 0.f) set(id_main_,      sig);
         else {
             set(id_bwd_left_,  -sig);
@@ -251,19 +254,32 @@ ThrustCommand Autopilot::compute_thrust(const PhysicsBody&   module,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// compute_theta_control
 // error = нормализованная разница между нужным углом и текущим
-// normalizeAngle обязателен: без него PID видит 350° вместо -10°
 // ─────────────────────────────────────────────────────────────────────────────
 float Autopilot::compute_theta_control(const PhysicsBody&   module,
                                         const DockingTarget& target,
                                         float                dt)
 {
-    const float error = normalize_angle(target.port_angle - module.angle);
+    const float error = normalize_angle(target.port_angle - module.angle);  // port_angle - требуемый угол захода!
     return pid_theta_.update(error, dt);
+
+    // float desired_angle;
+
+    // if (phase_ == Phase::FINAL) {
+    //     // Финальный заход — точная ориентация для стыковки
+    //     desired_angle = target.port_angle;
+    // } else {
+    //     // ALIGN, APPROACH — смотрим носом на порт станции
+    //     const sf::Vector2f delta = target.port_position - module.position;  // вектор от центра модуля до порта станции
+    //     desired_angle = std::atan2(delta.y, delta.x) - std::numbers::pi_v<float> / 2.f;
+    // }
+
+    // const float error = normalize_angle(desired_angle - module.angle);
+    // return pid_theta_.update(error, dt);
+
+    // TODO рассщитать нормальную theta как угол порта модуля к порту станции
 }
 
-// C++20
 // ─────────────────────────────────────────────────────────────────────────────
 // compute_x_control — боковое смещение (перпендикуляр к оси захода)
 //
@@ -289,10 +305,9 @@ float Autopilot::compute_x_control(const PhysicsBody& module,
     // (перпендикуляр к направлению захода, Y↓ SFML)
     const float cos_a = std::cos(target.port_angle);
     const float sin_a = std::sin(target.port_angle);
-    const sf::Vector2f right{ cos_a, sin_a };
 
     // Проекция: насколько мы «сбоку» от оси стыковки
-    const float error = delta.x * right.x + delta.y * right.y;
+    const float error = delta.x * cos_a + delta.y * sin_a;
 
     return pid_x_.update(error, dt);
 }
@@ -316,49 +331,45 @@ float Autopilot::compute_y_control(const PhysicsBody& module,
     // Единичный вектор «вперёд» вдоль оси захода (к порту)
     const float cos_a = std::cos(target.port_angle);
     const float sin_a = std::sin(target.port_angle);
-    const sf::Vector2f forward{ -sin_a, cos_a };
-
+    
     // Проекция: насколько мы «далеко» от порта вдоль оси
-    const float error = delta.x * forward.x + delta.y * forward.y;
+    const float error = delta.x * (-sin_a) + delta.y * cos_a;
 
     return pid_y_.update(error, dt);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// local_velocity — проецирует мировую скорость на локальные оси модуля
-//
-// SFML Y↓, angle от +X по часовой:
-//   local_right   = ( cos_a,  sin_a)  — ось X модуля
-//   local_forward = (-sin_a,  cos_a)  — ось Y модуля (к носу)
-//
-// Это умножение вектора velocity на транспонированную матрицу поворота:
-//   | cos_a   sin_a | * | vx |
-//   |-sin_a   cos_a |   | vy |
-// ─────────────────────────────────────────────────────────────────────────────
-static sf::Vector2f local_velocity(const PhysicsBody& module) noexcept
+
+// проецирует мировую скорость на локальные оси модуля относительно станции
+static sf::Vector2f relative_local_velocity(const PhysicsBody& module,
+                                             const PhysicsBody& station) noexcept
 {
     const float cos_a = std::cos(module.angle);
     const float sin_a = std::sin(module.angle);
+    sf::Vector2f rel = module.velocity - station.velocity;  // ← относительная
     return {
-         module.velocity.x * cos_a + module.velocity.y * sin_a,  // боковая
-        -module.velocity.x * sin_a + module.velocity.y * cos_a   // продольная
+         rel.x * cos_a + rel.y * sin_a,
+        -rel.x * sin_a + rel.y * cos_a
     };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // compute_damp_x — гасим боковую скорость (local X)
 // ─────────────────────────────────────────────────────────────────────────────
-float Autopilot::compute_damp_x(const PhysicsBody& module, float dt)
+float Autopilot::compute_damp_x(const PhysicsBody& module,
+                                const PhysicsBody& station,
+                                float dt)
 {
-    const float local_vx = local_velocity(module).x;
+    const float local_vx = relative_local_velocity(module, station).x;
     return damp_x_.update(-local_vx, dt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // compute_damp_y — гасим продольную скорость (local Y)
 // ─────────────────────────────────────────────────────────────────────────────
-float Autopilot::compute_damp_y(const PhysicsBody& module, float dt)
+float Autopilot::compute_damp_y(const PhysicsBody& module,
+                                const PhysicsBody& station,
+                                float dt)
 {
-    const float local_vy = local_velocity(module).y;
+    const float local_vy = relative_local_velocity(module, station).y;
     return damp_y_.update(-local_vy, dt);
 }

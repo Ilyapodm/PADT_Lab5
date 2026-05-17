@@ -385,6 +385,7 @@ public:
     // Главный метод — вызывается каждый физический тик из Scene
     [[nodiscard]] ThrustCommand update(const PhysicsBody& module,
                                        const DockingTarget& target,
+                                       const PhysicsBody& station,
                                        float dt);
 
     // Уведомления от Scene о внешних событиях
@@ -431,6 +432,7 @@ private:
     // Считает ThrustCommand для текущей фазы
     [[nodiscard]] ThrustCommand compute_thrust(const PhysicsBody& module,
                                               const DockingTarget& target,
+                                              const PhysicsBody& station,
                                               float dt);
 
     // Управление по отдельным осям — вызываются из computeThrust()
@@ -447,8 +449,8 @@ private:
                                         float dt);
 
     // Velocity dampers — гашение остаточных скоростей
-    [[nodiscard]] float compute_damp_x(const PhysicsBody& module, float dt);
-    [[nodiscard]] float compute_damp_y(const PhysicsBody& module, float dt);
+    [[nodiscard]] float compute_damp_x(const PhysicsBody& module, const PhysicsBody& station, float dt);
+    [[nodiscard]] float compute_damp_y(const PhysicsBody& module, const PhysicsBody& station, float dt);
 
     // θ-PID активен во всех управляемых фазах (ALIGN, APPROACH, FINAL)
     [[nodiscard]] bool isPid_theta_active()  const { return phase_ != Phase::DOCKED && phase_ != Phase::EXPLODED; }
