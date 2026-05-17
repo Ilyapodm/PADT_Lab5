@@ -82,5 +82,3 @@ private:
     float mass_    = 1.f;  // масса, кг
     float inertia_ = 1.f;  // момент инерции, кг·м²
 };
-
-// TODO сделать коллизию 

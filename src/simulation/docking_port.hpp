@@ -13,7 +13,7 @@ struct DockingPort {
     [[nodiscard]] float        world_angle   (const PhysicsBody& body) const;
 };
 
-// Порт станции как цель для модуля
+// Порт станции для автопилота
 struct DockingTarget {
     sf::Vector2f approach_point;  // точка за портом, откуда начинать заход
     sf::Vector2f port_position;   // мировые координаты порта станции

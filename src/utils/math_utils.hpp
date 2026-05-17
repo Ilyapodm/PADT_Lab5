@@ -9,8 +9,8 @@
 // Углы
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Нормализация угла в [-π, π].
-[[nodiscard]] constexpr float normalizeAngle(float a) noexcept {
+// Нормализация угла в [-π, π] - ошибка минимальна и есть знак направления
+[[nodiscard]] constexpr float normalize_angle(float a) noexcept {
     return std::remainder(a, 2.f * std::numbers::pi_v<float>);
 }
 
@@ -38,7 +38,7 @@ template<typename T>
 }
 
 // clamp в [-1, 1] — для нормированных управляющих сигналов
-[[nodiscard]] constexpr float clampSymmetric(float v) noexcept {
+[[nodiscard]] constexpr float clamp_symmetric(float v) noexcept {
     return std::clamp(v, -1.f, 1.f);
 }
 
@@ -70,7 +70,7 @@ template<typename T>
 }
 
 // Длина вектора в квадрате — когда нужно только сравнить, без sqrt
-[[nodiscard]] constexpr float lengthSq(sf::Vector2f v) noexcept {
+[[nodiscard]] constexpr float length_sq(sf::Vector2f v) noexcept {
     return v.x * v.x + v.y * v.y;
 }
 
